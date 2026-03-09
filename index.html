@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Flowchart Builder</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script
+      defer
+      src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"
+    ></script>
+    <script
+      defer
+      src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"
+    ></script>
+    <script
+      defer
+      src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"
+    ></script>
+    <script
+      defer
+      src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
+    ></script>
+    <script
+      defer
+      src="https://unpkg.com/mammoth@1.8.0/mammoth.browser.min.js"
+    ></script>
+    <script
+      defer
+      src="https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js"
+    ></script>
+    <script defer src="script.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar panel">
+        <div class="topbar-grid">
+          <a id="brandHomeLink" class="brand" href="#" aria-label="Flowchart Builder home">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 64 64" role="img" aria-hidden="true">
+                <defs>
+                  <linearGradient id="brandGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" stop-color="#12345b" />
+                    <stop offset="100%" stop-color="#2f9b95" />
+                  </linearGradient>
+                </defs>
+                <path
+                  d="M16 18h12M36 18h12M22 18v13m20-13v13M22 31h20m-20 0-7 12m27-12 7 12"
+                  fill="none"
+                  stroke="url(#brandGradient)"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="4"
+                />
+                <circle cx="16" cy="18" r="6" fill="#12345b" />
+                <circle cx="48" cy="18" r="6" fill="#12345b" />
+                <circle cx="32" cy="31" r="6" fill="#2f9b95" />
+                <circle cx="15" cy="43" r="6" fill="#7a8799" />
+                <circle cx="49" cy="43" r="6" fill="#7a8799" />
+              </svg>
+            </span>
+            <span class="brand-copy">
+              <span class="brand-title">Flowchart Builder</span>
+              <span class="brand-subtitle">Created by Jetmir Troshani</span>
+            </span>
+          </a>
+
+          <div class="page-intro">
+            <p class="section-label">AI Workflow Builder</p>
+            <h1>Flowchart Builder</h1>
+            <p class="page-summary">
+              <strong>Purpose:</strong> Transform prompts, documents, and images into
+              structured workflow diagrams that are useful, editable, and export-ready.
+            </p>
+            <p class="page-summary">
+              <strong>How it works:</strong> Add source material, generate a draft
+              workflow, review the extracted logic, and refine the diagram and code in a
+              single workspace.
+            </p>
+          </div>
+        </div>
+
+        <nav class="screen-tabs" aria-label="Builder sections">
+          <button id="screenTabIntake" class="screen-tab is-active" type="button">
+            1. Intake
+          </button>
+          <button id="screenTabWorkspace" class="screen-tab" type="button">
+            2. Workspace
+          </button>
+          <button id="screenTabHistory" class="screen-tab" type="button">
+            3. Version History
+          </button>
+        </nav>
+      </header>
+
+      <main class="main-shell">
+        <section id="intakeScreen" class="screen intake-screen">
+          <div class="hero-grid">
+            <section class="hero-copy panel hero-support-panel">
+              <p class="eyebrow">Process Intake</p>
+              <h2>Build from plain language, documents, or images.</h2>
+              <p class="hero-subtitle">
+                Use one source or combine several. The builder extracts the workflow
+                logic and turns it into an editable diagram.
+              </p>
+              <p class="hero-body">
+                The generated workflow can be reviewed in a visual workspace, updated
+                from the prompt, and refined directly in code before export.
+              </p>
+
+              <div class="briefing-list">
+                <p>
+                  <strong>Accepted inputs:</strong> free text, PDF, DOCX, TXT,
+                  Markdown, JPEG, and PNG.
+                </p>
+                <p>
+                  <strong>Output:</strong> a structured flowchart with editable logic,
+                  live preview, and polished export.
+                </p>
+              </div>
+
+              <div class="sample-intro">
+                <p class="sample-label">Load a sample prompt</p>
+                <div id="sampleButtons" class="sample-buttons"></div>
+              </div>
+            </section>
+
+	            <section class="panel intake-panel">
+	              <div class="panel-heading">
+	                <div>
+	                  <h2>Describe Your Workflow</h2>
+	                  <p>
+	                    Paste instructions in natural language, upload an attachment, or
+	                    start from one of the sample prompts below.
+                  </p>
+                </div>
+              </div>
+
+              <label class="field" for="promptInput">
+                <span class="field-label with-action">
+                  <span>Workflow Instructions</span>
+                  <button id="clearPromptButton" class="ghost-button mini-button" type="button">
+                    Clear
+                  </button>
+                </span>
+                <textarea
+                  id="promptInput"
+                  rows="14"
+                  spellcheck="true"
+                  placeholder="Example:
+
+An employee submits an expense request.
+The finance team reviews the request.
+
+If the expense follows company policy, it is approved and payment is issued.
+If the expense does not follow policy, the request is returned to the employee for correction.
+
+Once corrected, the employee resubmits the request for review."
+                ></textarea>
+              </label>
+
+              <p class="helper-text">
+                You can write in free text or upload a document or image. The builder
+                detects steps, decisions, branches, and simple loops automatically.
+              </p>
+
+              <section class="attachment-panel" aria-label="Attachment upload">
+                <input
+                  id="attachmentInput"
+                  class="hidden-file-input"
+                  type="file"
+                  accept=".pdf,.docx,.txt,.md,.markdown,.jpg,.jpeg,.png,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,image/jpeg,image/png"
+                />
+                <div class="attachment-row">
+                  <button
+                    id="uploadAttachmentButton"
+                    class="secondary-button"
+                    type="button"
+                  >
+                    Upload Attachment
+                  </button>
+                </div>
+                <p class="attachment-note">
+                  Upload a document or image to automatically generate a flowchart from
+                  its content.
+                </p>
+                <p id="attachmentStatus" class="attachment-status" aria-live="polite"></p>
+              </section>
+
+              <div class="button-row">
+                <button id="createDiagramButton" class="primary-button" type="button">
+                  Create Diagram
+                </button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="workspaceScreen" class="screen workspace-screen" hidden>
+          <div class="workspace-header panel workspace-header-card">
+            <div>
+              <p class="section-label">Diagram Workspace</p>
+              <h2>Interactive Flowchart Editor</h2>
+              <p class="workspace-copy">
+                Review the generated workflow, adjust the source text, and refine the
+                code while keeping the diagram export-ready.
+              </p>
+            </div>
+
+            <div class="workspace-tools">
+              <label class="inline-field" for="layoutSelect">
+                <span>Layout</span>
+                <select id="layoutSelect">
+                  <option value="TB">Top to bottom</option>
+                  <option value="LR">Left to right</option>
+                </select>
+              </label>
+              <button id="startOverButton" class="ghost-button compact-button" type="button">
+                Start Over
+              </button>
+            </div>
+          </div>
+
+          <div class="workspace-grid">
+            <section class="panel preview-panel">
+              <div class="panel-heading">
+                <div>
+                  <h3>Diagram Preview</h3>
+                  <p id="diagramStatus" class="status-text" aria-live="polite">
+                    Click Create Diagram to build the workflow.
+                  </p>
+                </div>
+              </div>
+
+              <div class="canvas-toolbar">
+                <button
+                  id="downloadDiagramButton"
+                  class="secondary-button"
+                  type="button"
+                  disabled
+                >
+                  Download Diagram
+                </button>
+                <button
+                  id="viewFullscreenButton"
+                  class="secondary-button"
+                  type="button"
+                  disabled
+                >
+                  View Fullscreen
+                </button>
+              </div>
+
+              <p class="diagram-hint">
+                Drag to pan. Use your mouse wheel or the zoom controls to scale the
+                view. Use the + and - controls next to steps to add or remove items,
+                and double-click any shape or connector label to edit it inline. Press
+                Enter or click away to save.
+              </p>
+
+              <div id="diagramShell" class="diagram-shell">
+                <button
+                  id="returnFromFullscreenButton"
+                  class="ghost-button diagram-return-button"
+                  type="button"
+                  hidden
+                >
+                  Return
+                </button>
+                <div class="diagram-overlay-tools" aria-label="Diagram zoom controls">
+                  <button
+                    id="zoomOutButton"
+                    class="viewer-button"
+                    type="button"
+                    aria-label="Zoom out"
+                    disabled
+                  >
+                    -
+                  </button>
+                  <span id="zoomLevel" class="zoom-level" aria-live="polite">100%</span>
+                  <button
+                    id="zoomInButton"
+                    class="viewer-button"
+                    type="button"
+                    aria-label="Zoom in"
+                    disabled
+                  >
+                    +
+                  </button>
+                  <button
+                    id="fitDiagramButton"
+                    class="ghost-button viewer-fit-button"
+                    type="button"
+                    disabled
+                  >
+                    Fit
+                  </button>
+                </div>
+
+                <div id="diagramViewport" class="diagram-viewport">
+                  <div
+                    id="diagramCanvas"
+                    class="diagram-canvas"
+                    aria-label="Interactive flowchart canvas"
+                  ></div>
+                  <div id="emptyCanvas" class="empty-state" aria-hidden="true"></div>
+                  <div id="nodeControlLayer" class="node-control-layer" aria-hidden="true"></div>
+                  <div id="diagramEditorLayer" class="diagram-editor-layer" aria-live="polite">
+                    <textarea
+                      id="inlineNodeEditor"
+                      class="inline-node-editor"
+                      rows="2"
+                      spellcheck="true"
+                      hidden
+                    ></textarea>
+                    <input
+                      id="inlineEdgeEditor"
+                      class="inline-edge-editor"
+                      type="text"
+                      spellcheck="true"
+                      hidden
+                    />
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <aside class="panel editor-panel" hidden>
+              <div class="panel-heading">
+                <div>
+                  <h3>Prompt and Diagram Code</h3>
+                  <p>
+                    Edit the prompt and update the flowchart, or edit the code and click
+                    Update Diagram.
+                  </p>
+                </div>
+              </div>
+
+              <label class="field" for="workspacePromptInput">
+                <span class="field-label">Workflow Prompt</span>
+                <textarea
+                  id="workspacePromptInput"
+                  rows="8"
+                  spellcheck="true"
+                  placeholder="Edit the workflow prompt here, then update the flowchart."
+                ></textarea>
+              </label>
+
+              <div class="editor-actions">
+                <button id="updateFlowchartButton" class="secondary-button" type="button">
+                  Update Flowchart
+                </button>
+              </div>
+
+              <div class="code-header">
+                <span class="field-label">Flowchart Code</span>
+                <span id="codeMeta" class="code-meta">Editable and synced</span>
+              </div>
+              <p id="codeStatus" class="code-status">
+                Edit the code, then click Update Diagram.
+              </p>
+
+              <textarea
+                id="codeEditor"
+                class="code-editor"
+                rows="20"
+                spellcheck="false"
+                placeholder="Flowchart code will appear here after you create a diagram."
+              ></textarea>
+
+              <div class="editor-actions">
+                <button id="updateCodeButton" class="secondary-button" type="button">
+                  Update Diagram
+                </button>
+                <button id="copyCodeButton" class="secondary-button" type="button">
+                  Copy Code
+                </button>
+                <button id="resetCodeButton" class="ghost-button" type="button">
+                  Reset to Last Build
+                </button>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="historyScreen" class="screen history-screen" hidden>
+          <div class="workspace-header panel workspace-header-card history-header-card">
+            <div>
+              <p class="section-label">Version History</p>
+              <h2>Saved Flowcharts</h2>
+              <p class="workspace-copy">
+                Save your current flowchart, revisit earlier versions, and continue editing
+                from a single organized list.
+              </p>
+            </div>
+
+            <div class="workspace-tools">
+              <button id="saveVersionButton" class="primary-button" type="button">
+                Save Current Flowchart
+              </button>
+            </div>
+          </div>
+
+          <section class="panel history-panel">
+            <div class="panel-heading">
+              <div>
+                <h3>History Entries</h3>
+                <p id="historySummary" class="status-text" aria-live="polite">
+                  No saved flowcharts yet.
+                </p>
+              </div>
+            </div>
+
+            <div id="historyEmptyState" class="history-empty-state">
+              Save a flowchart to start building your version history. Each saved entry will
+              keep its prompt, diagram code, and workspace state ready to reopen.
+            </div>
+
+            <div id="historyList" class="history-list" aria-live="polite"></div>
+          </section>
+        </section>
+      </main>
+
+		      <section class="privacy-banner" aria-label="Privacy and data retention notice">
+		        <div class="privacy-banner-icon" aria-hidden="true">i</div>
+		        <p>
+		          <strong>Privacy &amp; Data Retention:</strong> Drafts and saved flowcharts
+		          are stored locally in your browser until you delete them. Use Version
+		          History to remove saved items whenever you wish.
+		        </p>
+		      </section>
+
+	      <footer class="site-footer"></footer>
+	    </div>
+	  </body>
+	</html>
