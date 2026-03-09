@@ -759,6 +759,23 @@ button:disabled {
   padding-inline: 16px;
 }
 
+.viewer-undo-button {
+  min-height: 40px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 248, 251, 0.94));
+  border-color: rgba(18, 52, 91, 0.08);
+  box-shadow: 0 10px 22px rgba(13, 39, 70, 0.08);
+  color: var(--cuny-blue-deep);
+  font-size: 0.86rem;
+}
+
+.viewer-undo-button:hover:not(:disabled) {
+  background:
+    linear-gradient(180deg, rgba(248, 251, 252, 0.98), rgba(235, 242, 246, 0.96));
+}
+
 .zoom-level {
   min-width: 52px;
   text-align: center;
@@ -954,6 +971,11 @@ button:disabled {
   outline: none;
   box-shadow: 0 20px 36px rgba(13, 39, 70, 0.16);
   font: 600 0.96rem/1.4 "Public Sans", "Segoe UI", sans-serif;
+}
+
+.inline-node-editor[hidden],
+.inline-edge-editor[hidden] {
+  display: none !important;
 }
 
 .inline-node-editor {

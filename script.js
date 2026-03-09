@@ -1,6 +1,8 @@
 const STORAGE_KEY = "flowchart-builder-interactive:v1";
 const HISTORY_STORAGE_KEY = "flowchart-builder-history:v1";
 const DEFAULT_LAYOUT = "TB";
+const MAX_UNDO_HISTORY = 60;
+const VERSION_HISTORY_AUTOSAVE_DELAY = 900;
 const PDF_WORKER_SRC =
   "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 const HISTORY_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
@@ -89,6 +91,7 @@ const state = {
   prompt: "",
   code: "",
   graph: null,
+  nodePositions: {},
   layout: DEFAULT_LAYOUT,
   selection: null,
   activeSample: "expenseApproval",
@@ -103,11 +106,16 @@ let cy = null;
 let suppressCodeSync = false;
 let viewportResizeTimer = 0;
 let codeSyncTimer = 0;
+let versionHistoryAutoSaveTimer = 0;
+let suppressVersionHistoryAutoSave = false;
+let pendingCodeSyncPreviousSnapshot = null;
 let inlineEditorState = null;
 let pendingInlineEditor = null;
 let lastCanvasTap = { kind: "", id: "", time: 0 };
 let nodeLabelMeasureContext = null;
 let connectorDraft = null;
+let diagramUndoStack = [];
+let pendingNodeMoveUndoSnapshot = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   cacheDom();
@@ -143,6 +151,8 @@ function cacheDom() {
   refs.emptyCanvas = document.getElementById("emptyCanvas");
   refs.nodeControlLayer = document.getElementById("nodeControlLayer");
   refs.diagramStatus = document.getElementById("diagramStatus");
+  refs.undoDiagramButton = document.getElementById("undoDiagramButton");
+  refs.undoDiagramOverlayButton = document.getElementById("undoDiagramOverlayButton");
   refs.downloadDiagramButton = document.getElementById("downloadDiagramButton");
   refs.viewFullscreenButton = document.getElementById("viewFullscreenButton");
   refs.returnFromFullscreenButton = document.getElementById("returnFromFullscreenButton");
@@ -253,11 +263,13 @@ function bindEvents() {
   refs.historyList.addEventListener("click", handleHistoryListClick);
 
   refs.layoutSelect.addEventListener("change", () => {
+    const previousSnapshot = createWorkspaceSnapshot();
     state.layout = refs.layoutSelect.value || DEFAULT_LAYOUT;
     if (state.graph) {
       state.graph.direction = state.layout;
       commitGraph(state.graph, {
         source: "layout",
+        previousSnapshot,
         updateCode: true,
         preserveSelection: true,
         successMessage: "Layout updated.",
@@ -272,6 +284,9 @@ function bindEvents() {
       return;
     }
 
+    if (!pendingCodeSyncPreviousSnapshot) {
+      pendingCodeSyncPreviousSnapshot = createWorkspaceSnapshot();
+    }
     state.code = refs.codeEditor.value;
     refs.codeMeta.textContent = "Edited locally";
     setCodeStatus("Code edited. Updating the diagram preview as the code becomes valid.");
@@ -290,6 +305,8 @@ function bindEvents() {
     applyCodeChanges();
   });
 
+  refs.undoDiagramButton.addEventListener("click", undoLastDiagramChange);
+  refs.undoDiagramOverlayButton.addEventListener("click", undoLastDiagramChange);
   refs.downloadDiagramButton.addEventListener("click", downloadDiagram);
   refs.viewFullscreenButton.addEventListener("click", enterDiagramFullscreen);
   refs.returnFromFullscreenButton.addEventListener("click", exitDiagramFullscreen);
@@ -312,13 +329,43 @@ function bindEvents() {
   refs.inlineEdgeEditor.addEventListener("blur", handleInlineEditorBlur);
   refs.diagramViewport.addEventListener("dblclick", handleDiagramViewportDoubleClick);
   document.addEventListener("click", handleDocumentClick);
+  document.addEventListener("keydown", handleGlobalEditorShortcuts);
+  document.addEventListener("visibilitychange", handleDocumentVisibilityChange);
   document.addEventListener("fullscreenchange", handleFullscreenChange);
   document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+  window.addEventListener("pagehide", flushVersionHistoryAutoSave);
   window.addEventListener("resize", handleViewportResize, { passive: true });
 }
 
 function handleDocumentClick(event) {
   void event;
+}
+
+function handleGlobalEditorShortcuts(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  if (
+    target?.closest("textarea") ||
+    target?.closest("input") ||
+    target?.closest("select") ||
+    target?.closest("[contenteditable='true']")
+  ) {
+    return;
+  }
+
+  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "z") {
+    if (!diagramUndoStack.length) {
+      return;
+    }
+
+    event.preventDefault();
+    undoLastDiagramChange();
+  }
+}
+
+function handleDocumentVisibilityChange() {
+  if (document.visibilityState === "hidden") {
+    flushVersionHistoryAutoSave();
+  }
 }
 
 function setAddNodeMenuOpen(isOpen) {
@@ -344,15 +391,23 @@ function commitInlineEditorIfNeeded(cancelFollowUp = false) {
 function scheduleCodeSyncFromEditor() {
   window.clearTimeout(codeSyncTimer);
   codeSyncTimer = window.setTimeout(() => {
-    syncCodeEditorToDiagram();
+    syncCodeEditorToDiagram({
+      previousSnapshot: pendingCodeSyncPreviousSnapshot || createWorkspaceSnapshot(),
+    });
   }, 260);
 }
 
 function syncCodeEditorToDiagram(options = {}) {
+  const previousSnapshot =
+    options.previousSnapshot || pendingCodeSyncPreviousSnapshot || createWorkspaceSnapshot();
   const code = refs.codeEditor.value;
   state.code = code;
 
   if (!code.trim()) {
+    if (shouldRecordUndoForSource(options.source || "code", options)) {
+      recordUndoSnapshot(previousSnapshot);
+    }
+    pendingCodeSyncPreviousSnapshot = null;
     state.hasDiagram = false;
     clearRenderedDiagramSurface();
     refs.codeMeta.textContent = "Edited directly";
@@ -378,10 +433,12 @@ function syncCodeEditorToDiagram(options = {}) {
 
   commitGraph(parsed.graph, {
     source: options.source || "code",
+    previousSnapshot,
     updateCode: false,
     preserveSelection: options.preserveSelection !== false,
     successMessage: options.successMessage || "Diagram refreshed from code.",
   });
+  pendingCodeSyncPreviousSnapshot = null;
 
   return true;
 }
@@ -1735,11 +1792,19 @@ function applyInlineEditorChanges() {
 function hideInlineEditors() {
   inlineEditorState = null;
   lastCanvasTap = { kind: "", id: "", time: 0 };
+  if (document.activeElement === refs.inlineNodeEditor) {
+    refs.inlineNodeEditor.blur();
+  }
+  if (document.activeElement === refs.inlineEdgeEditor) {
+    refs.inlineEdgeEditor.blur();
+  }
   refs.inlineNodeEditor.hidden = true;
   refs.inlineEdgeEditor.hidden = true;
   refs.inlineNodeEditor.classList.remove("is-terminal", "is-decision");
   refs.inlineNodeEditor.value = "";
+  refs.inlineNodeEditor.placeholder = "";
   refs.inlineEdgeEditor.value = "";
+  refs.inlineEdgeEditor.placeholder = "";
   refs.inlineNodeEditor.style.left = "";
   refs.inlineNodeEditor.style.top = "";
   refs.inlineNodeEditor.style.width = "";
@@ -2153,9 +2218,34 @@ function initializeCanvas() {
     positionInlineEditor();
     positionNodeControls();
   });
+  cy.on("grab", "node", () => {
+    syncNodePositionsFromCanvas({ persist: false });
+    pendingNodeMoveUndoSnapshot = createWorkspaceSnapshot();
+  });
   cy.on("position drag", () => {
     positionInlineEditor();
     positionNodeControls();
+  });
+  cy.on("free", "node", (event) => {
+    positionInlineEditor();
+    positionNodeControls();
+    const currentPositions = captureRenderedNodePositions();
+    const previousSnapshot = pendingNodeMoveUndoSnapshot;
+    pendingNodeMoveUndoSnapshot = null;
+    const movedNodeId = event.target?.id?.();
+    const didMove =
+      movedNodeId
+      && previousSnapshot
+      && hasNodePositionChanged(
+        movedNodeId,
+        previousSnapshot.nodePositions,
+        currentPositions
+      );
+    state.nodePositions = filterNodePositionsForGraph(state.graph, currentPositions);
+    if (didMove) {
+      recordUndoSnapshot(previousSnapshot);
+    }
+    persistState();
   });
   cy.on("dragfreeon", () => {
     positionInlineEditor();
@@ -2165,10 +2255,158 @@ function initializeCanvas() {
   updateZoomReadout();
 }
 
+function normalizeCoordinate(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+
+  return Math.round(numeric * 100) / 100;
+}
+
+function normalizeNodePositions(saved = {}) {
+  if (!saved || typeof saved !== "object") {
+    return {};
+  }
+
+  const normalized = {};
+  Object.entries(saved).forEach(([nodeId, position]) => {
+    if (typeof nodeId !== "string" || !nodeId) {
+      return;
+    }
+
+    const x = normalizeCoordinate(position?.x);
+    const y = normalizeCoordinate(position?.y);
+    if (x === null || y === null) {
+      return;
+    }
+
+    normalized[nodeId] = { x, y };
+  });
+
+  return normalized;
+}
+
+function cloneNodePositions(positions = state.nodePositions) {
+  return normalizeNodePositions(positions);
+}
+
+function filterNodePositionsForGraph(graph, positions = state.nodePositions) {
+  if (!graph?.nodes?.length) {
+    return {};
+  }
+
+  const normalized = normalizeNodePositions(positions);
+  const filtered = {};
+  graph.nodes.forEach((node) => {
+    if (normalized[node.id]) {
+      filtered[node.id] = {
+        x: normalized[node.id].x,
+        y: normalized[node.id].y,
+      };
+    }
+  });
+  return filtered;
+}
+
+function hasStoredNodePositionsForGraph(graph, positions = state.nodePositions) {
+  if (!graph?.nodes?.length) {
+    return false;
+  }
+
+  const filtered = filterNodePositionsForGraph(graph, positions);
+  return graph.nodes.every((node) => Boolean(filtered[node.id]));
+}
+
+function nodePositionsMatch(left, right) {
+  const a = normalizeNodePositions(left);
+  const b = normalizeNodePositions(right);
+  const aKeys = Object.keys(a).sort();
+  const bKeys = Object.keys(b).sort();
+
+  if (aKeys.length !== bKeys.length) {
+    return false;
+  }
+
+  return aKeys.every((key, index) => {
+    if (key !== bKeys[index]) {
+      return false;
+    }
+
+    return a[key].x === b[key].x && a[key].y === b[key].y;
+  });
+}
+
+function hasNodePositionChanged(nodeId, beforePositions, afterPositions, threshold = 1) {
+  const before = normalizeNodePositions(beforePositions)[nodeId];
+  const after = normalizeNodePositions(afterPositions)[nodeId];
+  if (!before || !after) {
+    return Boolean(before || after);
+  }
+
+  return (
+    Math.abs(before.x - after.x) > threshold
+    || Math.abs(before.y - after.y) > threshold
+  );
+}
+
+function captureRenderedNodePositions() {
+  if (!cy || cy.nodes().length === 0) {
+    return {};
+  }
+
+  const positions = {};
+  cy.nodes().forEach((node) => {
+    const current = node.position();
+    const x = normalizeCoordinate(current?.x);
+    const y = normalizeCoordinate(current?.y);
+    if (x === null || y === null) {
+      return;
+    }
+
+    positions[node.id()] = { x, y };
+  });
+  return positions;
+}
+
+function syncNodePositionsFromCanvas(options = {}) {
+  const nextPositions = filterNodePositionsForGraph(
+    state.graph,
+    captureRenderedNodePositions()
+  );
+  const changed = !nodePositionsMatch(state.nodePositions, nextPositions);
+  state.nodePositions = nextPositions;
+  if (changed && options.persist !== false) {
+    persistState();
+  }
+  return changed;
+}
+
+function applyStoredNodePositions(positions = state.nodePositions) {
+  if (!cy || cy.nodes().length === 0) {
+    return false;
+  }
+
+  const normalized = normalizeNodePositions(positions);
+  const cyNodes = cy.nodes();
+  const canApply = cyNodes.toArray().every((node) => Boolean(normalized[node.id()]));
+  if (!canApply) {
+    return false;
+  }
+
+  cy.batch(() => {
+    cyNodes.forEach((node) => {
+      node.position(normalized[node.id()]);
+    });
+  });
+  return true;
+}
+
 function normalizeWorkspaceSnapshot(saved = {}) {
   return {
     prompt: typeof saved.prompt === "string" ? saved.prompt : "",
     code: typeof saved.code === "string" ? saved.code : "",
+    nodePositions: normalizeNodePositions(saved.nodePositions),
     layout: typeof saved.layout === "string" ? saved.layout : DEFAULT_LAYOUT,
     activeSample:
       typeof saved.activeSample === "string" && SAMPLE_PROMPTS[saved.activeSample]
@@ -2185,14 +2423,109 @@ function normalizeWorkspaceSnapshot(saved = {}) {
 }
 
 function createWorkspaceSnapshot() {
+  const nodePositions =
+    state.graph && cy && cy.nodes().length
+      ? filterNodePositionsForGraph(state.graph, captureRenderedNodePositions())
+      : cloneNodePositions(state.nodePositions);
+
   return {
     prompt: state.prompt,
     code: state.code,
+    nodePositions,
     layout: state.layout,
     activeSample: state.activeSample,
     hasDiagram: state.hasDiagram,
     lastGeneratedCode: state.lastGeneratedCode,
+    currentHistoryId: state.currentHistoryId,
+    currentHistoryTitle: state.currentHistoryTitle,
   };
+}
+
+function workspaceSnapshotsMatch(left, right) {
+  const a = normalizeWorkspaceSnapshot(left);
+  const b = normalizeWorkspaceSnapshot(right);
+  return (
+    a.prompt === b.prompt &&
+    a.code === b.code &&
+    nodePositionsMatch(a.nodePositions, b.nodePositions) &&
+    a.layout === b.layout &&
+    a.activeSample === b.activeSample &&
+    a.hasDiagram === b.hasDiagram &&
+    a.lastGeneratedCode === b.lastGeneratedCode &&
+    a.currentHistoryId === b.currentHistoryId &&
+    a.currentHistoryTitle === b.currentHistoryTitle
+  );
+}
+
+function recordUndoSnapshot(snapshot) {
+  const normalized = normalizeWorkspaceSnapshot(snapshot);
+  const lastSnapshot = diagramUndoStack[diagramUndoStack.length - 1];
+  if (lastSnapshot && workspaceSnapshotsMatch(lastSnapshot, normalized)) {
+    updateUndoButtonState();
+    return;
+  }
+
+  diagramUndoStack.push(normalized);
+  if (diagramUndoStack.length > MAX_UNDO_HISTORY) {
+    diagramUndoStack.shift();
+  }
+
+  updateUndoButtonState();
+}
+
+function clearUndoHistory() {
+  diagramUndoStack = [];
+  updateUndoButtonState();
+}
+
+function updateUndoButtonState() {
+  const isDisabled = diagramUndoStack.length === 0;
+
+  if (refs.undoDiagramButton) {
+    refs.undoDiagramButton.disabled = isDisabled;
+  }
+
+  if (refs.undoDiagramOverlayButton) {
+    refs.undoDiagramOverlayButton.disabled = isDisabled;
+  }
+}
+
+function shouldRecordUndoForSource(source, options = {}) {
+  if (typeof options.recordUndo === "boolean") {
+    return options.recordUndo;
+  }
+
+  return source === "canvas" || source === "code" || source === "layout" || source === "prompt";
+}
+
+function undoLastDiagramChange() {
+  if (!diagramUndoStack.length) {
+    setDiagramStatus("Nothing to undo yet.");
+    updateUndoButtonState();
+    return;
+  }
+
+  window.clearTimeout(codeSyncTimer);
+  commitInlineEditorIfNeeded(true);
+  connectorDraft = null;
+  pendingNodeMoveUndoSnapshot = null;
+  pendingInlineEditor = null;
+  lastCanvasTap = { kind: "", id: "", time: 0 };
+  hideInlineEditors();
+  refs.nodeControlLayer.innerHTML = "";
+  setAddNodeMenuOpen(false);
+  setNodeActionMenuTarget("");
+
+  const snapshot = diagramUndoStack.pop();
+  updateUndoButtonState();
+  applyWorkspaceSnapshot(snapshot, {
+    source: "undo",
+    useSampleFallback: false,
+    successMessage: "Last diagram change undone.",
+    emptyDiagramMessage: "Returned to the previous draft state.",
+    emptyCodeMessage: "Returned to the previous draft state.",
+    screen: "workspace",
+  });
 }
 
 function hasWorkspaceContent(snapshot) {
@@ -2338,7 +2671,7 @@ function updateSaveVersionButtonState() {
 
   refs.saveVersionButton.disabled = !hasWorkspaceContent(createWorkspaceSnapshot());
   refs.saveVersionButton.textContent = getCurrentHistoryEntry()
-    ? "Update Saved Flowchart"
+    ? "Save Snapshot Now"
     : "Save Current Flowchart";
 }
 
@@ -2353,14 +2686,15 @@ function renderVersionHistory() {
   refs.historyList.hidden = !hasEntries;
 
   if (!hasEntries) {
-    refs.historySummary.textContent = "No saved flowcharts yet.";
+    refs.historySummary.textContent =
+      "No saved flowcharts yet. Create a diagram and autosave will keep it here as you edit.";
     updateSaveVersionButtonState();
     return;
   }
 
   refs.historySummary.textContent = `${state.historyEntries.length} saved ${
     state.historyEntries.length === 1 ? "flowchart" : "flowcharts"
-  }. Open one to continue editing or manage it here.`;
+  }. Open one to continue editing or manage it here. Autosave keeps the current flowchart up to date while you work.`;
 
   state.historyEntries.forEach((entry) => {
     const article = document.createElement("article");
@@ -2409,6 +2743,95 @@ function renderVersionHistory() {
   updateSaveVersionButtonState();
 }
 
+function shouldAutoSaveToVersionHistory(snapshot = createWorkspaceSnapshot()) {
+  return Boolean(snapshot.hasDiagram && snapshot.code.trim());
+}
+
+function scheduleVersionHistoryAutoSave() {
+  if (!shouldAutoSaveToVersionHistory()) {
+    window.clearTimeout(versionHistoryAutoSaveTimer);
+    versionHistoryAutoSaveTimer = 0;
+    return;
+  }
+
+  window.clearTimeout(versionHistoryAutoSaveTimer);
+  versionHistoryAutoSaveTimer = window.setTimeout(() => {
+    versionHistoryAutoSaveTimer = 0;
+    persistCurrentVersion({ silent: true, source: "autosave" });
+  }, VERSION_HISTORY_AUTOSAVE_DELAY);
+}
+
+function flushVersionHistoryAutoSave() {
+  if (!versionHistoryAutoSaveTimer) {
+    return;
+  }
+
+  window.clearTimeout(versionHistoryAutoSaveTimer);
+  versionHistoryAutoSaveTimer = 0;
+  persistCurrentVersion({ silent: true, source: "autosave" });
+}
+
+function persistCurrentVersion(options = {}) {
+  const snapshot = createWorkspaceSnapshot();
+  if (!hasWorkspaceContent(snapshot)) {
+    return false;
+  }
+
+  if (options.source === "autosave" && !shouldAutoSaveToVersionHistory(snapshot)) {
+    return false;
+  }
+
+  const timestamp = new Date().toISOString();
+  const currentEntry = getCurrentHistoryEntry();
+  const nextTitle = cleanLabel(state.currentHistoryTitle) || inferSnapshotTitle(snapshot);
+
+  if (currentEntry) {
+    const snapshotChanged = !workspaceSnapshotsMatch(currentEntry.snapshot, snapshot);
+    const titleChanged = currentEntry.title !== nextTitle;
+    if (!snapshotChanged && !titleChanged) {
+      return false;
+    }
+
+    currentEntry.title = nextTitle;
+    currentEntry.updatedAt = timestamp;
+    currentEntry.snapshot = {
+      ...snapshot,
+      currentHistoryId: currentEntry.id,
+      currentHistoryTitle: currentEntry.title,
+    };
+    state.currentHistoryTitle = currentEntry.title;
+  } else {
+    const entry = {
+      id: generateHistoryId(),
+      title: nextTitle,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      snapshot: {
+        ...snapshot,
+      },
+    };
+    state.historyEntries.unshift(entry);
+    state.currentHistoryId = entry.id;
+    state.currentHistoryTitle = entry.title;
+    entry.snapshot.currentHistoryId = entry.id;
+    entry.snapshot.currentHistoryTitle = entry.title;
+  }
+
+  sortHistoryEntries();
+  persistVersionHistory();
+  suppressVersionHistoryAutoSave = true;
+  persistState();
+  suppressVersionHistoryAutoSave = false;
+  renderVersionHistory();
+
+  if (!options.silent) {
+    setCodeStatus("Flowchart saved to version history.", "success");
+    setDiagramStatus("Flowchart saved to version history.", "Saved");
+  }
+
+  return true;
+}
+
 function hydrateState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -2437,6 +2860,7 @@ function persistState() {
       JSON.stringify({
         prompt: state.prompt,
         code: state.code,
+        nodePositions: state.nodePositions,
         layout: state.layout,
         activeSample: state.activeSample,
         hasDiagram: state.hasDiagram,
@@ -2450,6 +2874,9 @@ function persistState() {
   }
 
   updateSaveVersionButtonState();
+  if (!suppressVersionHistoryAutoSave) {
+    scheduleVersionHistoryAutoSave();
+  }
 }
 
 function detachCurrentHistoryContext() {
@@ -2459,7 +2886,12 @@ function detachCurrentHistoryContext() {
 
 function clearRenderedDiagramSurface() {
   window.clearTimeout(codeSyncTimer);
+  window.clearTimeout(versionHistoryAutoSaveTimer);
+  versionHistoryAutoSaveTimer = 0;
+  pendingCodeSyncPreviousSnapshot = null;
+  pendingNodeMoveUndoSnapshot = null;
   state.graph = null;
+  state.nodePositions = {};
   state.selection = null;
   pendingInlineEditor = null;
   connectorDraft = null;
@@ -2479,9 +2911,18 @@ function clearRenderedDiagramSurface() {
 }
 
 function applyWorkspaceSnapshot(snapshot, options = {}) {
+  window.clearTimeout(versionHistoryAutoSaveTimer);
+  versionHistoryAutoSaveTimer = 0;
+  pendingCodeSyncPreviousSnapshot = null;
+  pendingNodeMoveUndoSnapshot = null;
+  if ((options.source || "") !== "undo") {
+    clearUndoHistory();
+  }
+
   const normalized = normalizeWorkspaceSnapshot(snapshot);
   state.prompt = normalized.prompt;
   state.code = normalized.code;
+  state.nodePositions = normalized.nodePositions;
   state.layout = normalized.layout;
   state.activeSample = normalized.activeSample;
   state.hasDiagram = normalized.hasDiagram;
@@ -2534,40 +2975,14 @@ function applyWorkspaceSnapshot(snapshot, options = {}) {
 }
 
 function saveCurrentVersion() {
-  const snapshot = createWorkspaceSnapshot();
-  if (!hasWorkspaceContent(snapshot)) {
+  if (!hasWorkspaceContent(createWorkspaceSnapshot())) {
     setDiagramStatus("Add content or create a diagram before saving to version history.", "Nothing to save");
     return;
   }
 
-  const timestamp = new Date().toISOString();
-  const currentEntry = getCurrentHistoryEntry();
-  const title = cleanLabel(state.currentHistoryTitle) || inferDownloadTitle();
-
-  if (currentEntry) {
-    currentEntry.title = title;
-    currentEntry.updatedAt = timestamp;
-    currentEntry.snapshot = snapshot;
-    state.currentHistoryTitle = currentEntry.title;
-  } else {
-    const entry = {
-      id: generateHistoryId(),
-      title,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      snapshot,
-    };
-    state.historyEntries.unshift(entry);
-    state.currentHistoryId = entry.id;
-    state.currentHistoryTitle = entry.title;
-  }
-
-  sortHistoryEntries();
-  persistVersionHistory();
-  persistState();
-  renderVersionHistory();
-  setCodeStatus("Flowchart saved to version history.", "success");
-  setDiagramStatus("Flowchart saved to version history.", "Saved");
+  window.clearTimeout(versionHistoryAutoSaveTimer);
+  versionHistoryAutoSaveTimer = 0;
+  persistCurrentVersion({ silent: false, source: "manual" });
 }
 
 function handleHistoryListClick(event) {
@@ -2707,8 +3122,14 @@ function updatePrompt(value, source) {
 function loadSample(sampleKey) {
   const sample = SAMPLE_PROMPTS[sampleKey] || SAMPLE_PROMPTS.expenseApproval;
   window.clearTimeout(codeSyncTimer);
+  window.clearTimeout(versionHistoryAutoSaveTimer);
+  versionHistoryAutoSaveTimer = 0;
+  pendingCodeSyncPreviousSnapshot = null;
+  pendingNodeMoveUndoSnapshot = null;
+  clearUndoHistory();
   detachCurrentHistoryContext();
   state.activeSample = sampleKey in SAMPLE_PROMPTS ? sampleKey : "expenseApproval";
+  state.nodePositions = {};
   pendingInlineEditor = null;
   connectorDraft = null;
   lastCanvasTap = { kind: "", id: "", time: 0 };
@@ -2781,6 +3202,9 @@ function buildDiagramFromPrompt(showWorkspaceAfterBuild, successMessage) {
   }
 
   window.clearTimeout(codeSyncTimer);
+  window.clearTimeout(versionHistoryAutoSaveTimer);
+  versionHistoryAutoSaveTimer = 0;
+  pendingCodeSyncPreviousSnapshot = null;
   pendingInlineEditor = null;
   connectorDraft = null;
   lastCanvasTap = { kind: "", id: "", time: 0 };
@@ -2805,11 +3229,17 @@ function buildDiagramFromPrompt(showWorkspaceAfterBuild, successMessage) {
 function resetToStart() {
   window.clearTimeout(viewportResizeTimer);
   window.clearTimeout(codeSyncTimer);
+  window.clearTimeout(versionHistoryAutoSaveTimer);
+  versionHistoryAutoSaveTimer = 0;
+  pendingCodeSyncPreviousSnapshot = null;
+  pendingNodeMoveUndoSnapshot = null;
+  clearUndoHistory();
   if (isDiagramFullscreen()) {
     void exitDiagramFullscreen();
   }
   state.graph = null;
   state.code = "";
+  state.nodePositions = {};
   state.prompt = "";
   state.selection = null;
   state.layout = DEFAULT_LAYOUT;
@@ -2869,10 +3299,17 @@ function looksLikeArrowFlow(text) {
 
 function commitGraph(graph, options = {}) {
   const source = options.source || "graph";
+  if (shouldRecordUndoForSource(source, options)) {
+    recordUndoSnapshot(options.previousSnapshot || createWorkspaceSnapshot());
+  }
+
   setAddNodeMenuOpen(false);
   setNodeActionMenuTarget("");
+  pendingCodeSyncPreviousSnapshot = null;
+  pendingNodeMoveUndoSnapshot = null;
   connectorDraft = null;
   state.graph = normalizeGraph(graph);
+  state.nodePositions = filterNodePositionsForGraph(state.graph, state.nodePositions);
   state.layout = state.graph.direction || state.layout || DEFAULT_LAYOUT;
   refs.layoutSelect.value = state.layout;
 
@@ -2886,18 +3323,25 @@ function commitGraph(graph, options = {}) {
     refs.codeMeta.textContent = source === "code" ? "Edited directly" : "Editable and synced";
   }
 
-  renderGraph(state.graph, options.preserveSelection);
+  renderGraph(state.graph, {
+    preserveSelection: options.preserveSelection,
+    preferStoredPositions:
+      typeof options.preferStoredPositions === "boolean"
+        ? options.preferStoredPositions
+        : source !== "prompt" && source !== "layout",
+  });
   state.hasDiagram = true;
   persistState();
   setCodeStatus(options.successMessage || "Diagram synced successfully.", "success");
   setDiagramStatus(options.successMessage || "Diagram synced successfully.", "Synced");
 }
 
-function renderGraph(graph, preserveSelection) {
+function renderGraph(graph, options = {}) {
   if (!cy) {
     return;
   }
 
+  const preserveSelection = Boolean(options.preserveSelection);
   const elements = graphToElements(graph);
   setDiagramViewportControlsDisabled(elements.length === 0);
   refs.emptyCanvas.hidden = Boolean(elements.length);
@@ -2907,7 +3351,21 @@ function renderGraph(graph, preserveSelection) {
   renderNodeControls();
 
   if (elements.length) {
-    runLayout();
+    const restoredStoredPositions =
+      options.preferStoredPositions !== false
+      && hasStoredNodePositionsForGraph(graph, state.nodePositions)
+      && applyStoredNodePositions(state.nodePositions);
+    if (restoredStoredPositions) {
+      syncNodePositionsFromCanvas({ persist: false });
+      fitDiagramToViewport();
+      window.requestAnimationFrame(() => {
+        positionInlineEditor();
+        positionNodeControls();
+        openPendingInlineEditor();
+      });
+    } else {
+      runLayout();
+    }
   } else {
     updateZoomReadout();
     positionNodeControls();
@@ -2943,6 +3401,7 @@ function runLayout() {
   });
 
   cy.one("layoutstop", () => {
+    syncNodePositionsFromCanvas();
     fitDiagramToViewport();
     window.requestAnimationFrame(() => {
       positionInlineEditor();
@@ -3249,6 +3708,9 @@ function setSelection(selection) {
 
 function applyCodeChanges() {
   window.clearTimeout(codeSyncTimer);
+  window.clearTimeout(versionHistoryAutoSaveTimer);
+  versionHistoryAutoSaveTimer = 0;
+  const previousSnapshot = pendingCodeSyncPreviousSnapshot || createWorkspaceSnapshot();
   pendingInlineEditor = null;
   connectorDraft = null;
   lastCanvasTap = { kind: "", id: "", time: 0 };
@@ -3257,6 +3719,7 @@ function applyCodeChanges() {
   setNodeActionMenuTarget("");
   syncCodeEditorToDiagram({
     source: "code",
+    previousSnapshot,
     preserveSelection: true,
     successMessage: "Diagram refreshed from code.",
   });

@@ -234,6 +234,17 @@ Once corrected, the employee resubmits the request for review."
 
               <div class="canvas-toolbar">
                 <button
+                  id="undoDiagramButton"
+                  class="secondary-button"
+                  type="button"
+                  title="Undo the last diagram change (Ctrl/Cmd+Z)"
+                  aria-label="Undo the last diagram change"
+                  aria-keyshortcuts="Meta+Z Control+Z"
+                  disabled
+                >
+                  Undo
+                </button>
+                <button
                   id="downloadDiagramButton"
                   class="secondary-button"
                   type="button"
@@ -253,9 +264,9 @@ Once corrected, the employee resubmits the request for review."
 
               <p class="diagram-hint">
                 Drag to pan. Use your mouse wheel or the zoom controls to scale the
-                view. Use the + and - controls next to steps to add or remove items,
-                and double-click any shape or connector label to edit it inline. Press
-                Enter or click away to save.
+                view. Select any shape or connector to edit it inline, add steps,
+                branch decisions, or reconnect the flow. Use Undo to step back after
+                a change. Press Enter or click away to save text edits.
               </p>
 
               <div id="diagramShell" class="diagram-shell">
@@ -268,6 +279,17 @@ Once corrected, the employee resubmits the request for review."
                   Return
                 </button>
                 <div class="diagram-overlay-tools" aria-label="Diagram zoom controls">
+                  <button
+                    id="undoDiagramOverlayButton"
+                    class="ghost-button viewer-undo-button"
+                    type="button"
+                    title="Undo the last diagram change (Ctrl/Cmd+Z)"
+                    aria-label="Undo the last diagram change"
+                    aria-keyshortcuts="Meta+Z Control+Z"
+                    disabled
+                  >
+                    Undo
+                  </button>
                   <button
                     id="zoomOutButton"
                     class="viewer-button"
