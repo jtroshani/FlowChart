@@ -200,7 +200,7 @@ code,
 .brand-title {
   font-size: 1.12rem;
   font-weight: 700;
-  color: var(--cuny-blue-deep);
+  color: var(--cuny-blue);
 }
 
 .brand-subtitle {
@@ -220,7 +220,7 @@ code,
   font-size: clamp(2.35rem, 4vw, 3.5rem);
   line-height: 0.95;
   letter-spacing: -0.06em;
-  color: var(--cuny-blue-deep);
+  color: var(--cuny-blue);
   text-wrap: balance;
 }
 
